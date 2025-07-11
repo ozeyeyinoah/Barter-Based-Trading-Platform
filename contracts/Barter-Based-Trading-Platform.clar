@@ -153,3 +153,206 @@
         ))
     )
 )
+
+(define-constant ERR-USER-NOT-FOUND (err u200))
+
+(define-map user-reputation
+    { user: principal }
+    {
+        total-trades: uint,
+        successful-trades: uint,
+        reputation-score: uint,
+        last-updated: uint
+    }
+)
+
+(define-read-only (get-user-reputation (user principal))
+    (map-get? user-reputation { user: user })
+)
+
+(define-read-only (calculate-reputation-percentage (user principal))
+    (match (get-user-reputation user)
+        reputation-data
+        (if (> (get total-trades reputation-data) u0)
+            (ok (/ (* (get successful-trades reputation-data) u100) (get total-trades reputation-data)))
+            (ok u0)
+        )
+        ERR-USER-NOT-FOUND
+    )
+)
+
+(define-private (update-user-reputation (user principal) (successful bool))
+    (let ((current-rep (default-to 
+                        { total-trades: u0, successful-trades: u0, reputation-score: u0, last-updated: u0 }
+                        (get-user-reputation user))))
+        (map-set user-reputation
+            { user: user }
+            {
+                total-trades: (+ (get total-trades current-rep) u1),
+                successful-trades: (if successful 
+                    (+ (get successful-trades current-rep) u1)
+                    (get successful-trades current-rep)
+                ),
+                reputation-score: (if successful 
+                    (+ (get reputation-score current-rep) u10)
+                    (if (> (get reputation-score current-rep) u5)
+                        (- (get reputation-score current-rep) u5)
+                        u0
+                    )
+                ),
+                last-updated: burn-block-height
+            }
+        )
+    )
+)
+
+(define-public (complete-trade-with-reputation (trade-id uint))
+    (let ((trade (unwrap! (get-trade trade-id) ERR-TRADE-NOT-FOUND)))
+        (asserts! (or
+            (is-eq (get initiator trade) tx-sender)
+            (is-eq (get counterparty trade) tx-sender)
+        ) ERR-NOT-AUTHORIZED)
+        (asserts! (is-eq (get status trade) TRADE-STATUS-ACCEPTED) ERR-INVALID-STATE)
+        
+        (update-user-reputation (get initiator trade) true)
+        (update-user-reputation (get counterparty trade) true)
+        
+        (ok (map-set trades
+            { trade-id: trade-id }
+            (merge trade {
+                status: TRADE-STATUS-COMPLETED,
+                completed-at: burn-block-height
+            })
+        ))
+    )
+)
+
+(define-public (cancel-trade-with-reputation (trade-id uint))
+    (let ((trade (unwrap! (get-trade trade-id) ERR-TRADE-NOT-FOUND)))
+        (asserts! (or
+            (is-eq (get initiator trade) tx-sender)
+            (is-eq (get counterparty trade) tx-sender)
+        ) ERR-NOT-AUTHORIZED)
+        (asserts! (< (get status trade) TRADE-STATUS-COMPLETED) ERR-INVALID-STATE)
+        
+        (if (is-eq (get status trade) TRADE-STATUS-ACCEPTED)
+            (update-user-reputation tx-sender false)
+            true
+        )
+        
+        (ok (map-set trades
+            { trade-id: trade-id }
+            (merge trade { status: TRADE-STATUS-CANCELLED })
+        ))
+    )
+)
+
+(define-constant CATEGORY-ELECTRONICS u1)
+(define-constant CATEGORY-BOOKS u2)
+(define-constant CATEGORY-CLOTHING u3)
+(define-constant CATEGORY-SPORTS u4)
+(define-constant CATEGORY-HOME u5)
+(define-constant CATEGORY-AUTOMOTIVE u6)
+(define-constant CATEGORY-COLLECTIBLES u7)
+(define-constant CATEGORY-OTHER u8)
+
+(define-constant ERR-INVALID-CATEGORY (err u300))
+(define-constant MAX-RESULTS u50)
+
+(define-map categorized-trades
+    { trade-id: uint }
+    {
+        initiator: principal,
+        counterparty: principal,
+        initiator-offer: (string-ascii 256),
+        counterparty-offer: (string-ascii 256),
+        category: uint,
+        status: uint,
+        created-at: uint,
+        completed-at: uint
+    }
+)
+
+(define-map category-index
+    { category: uint, index: uint }
+    { trade-id: uint }
+)
+
+(define-map category-counts
+    { category: uint }
+    { count: uint }
+)
+
+(define-data-var categorized-trade-nonce uint u0)
+
+(define-private (is-valid-category (category uint))
+    (and (>= category u1) (<= category u8))
+)
+
+(define-read-only (get-categorized-trade (trade-id uint))
+    (map-get? categorized-trades { trade-id: trade-id })
+)
+
+(define-read-only (get-category-count (category uint))
+    (default-to u0 (get count (map-get? category-counts { category: category })))
+)
+
+(define-public (create-categorized-trade (counterparty principal) (initiator-offer (string-ascii 256)) (counterparty-offer (string-ascii 256)) (category uint))
+    (let ((trade-id (var-get categorized-trade-nonce))
+          (current-count (get-category-count category)))
+        (asserts! (not (is-eq tx-sender counterparty)) ERR-INVALID-STATE)
+        (asserts! (is-valid-category category) ERR-INVALID-CATEGORY)
+        
+        (map-set categorized-trades
+            { trade-id: trade-id }
+            {
+                initiator: tx-sender,
+                counterparty: counterparty,
+                initiator-offer: initiator-offer,
+                counterparty-offer: counterparty-offer,
+                category: category,
+                status: TRADE-STATUS-PENDING,
+                created-at: burn-block-height,
+                completed-at: u0
+            }
+        )
+        
+        (map-set category-index
+            { category: category, index: current-count }
+            { trade-id: trade-id }
+        )
+        
+        (map-set category-counts
+            { category: category }
+            { count: (+ current-count u1) }
+        )
+        
+        (var-set categorized-trade-nonce (+ trade-id u1))
+        (ok trade-id)
+    )
+)
+
+(define-read-only (get-trades-by-category (category uint) (start-index uint) (limit uint))
+    (let ((actual-limit (if (> limit MAX-RESULTS) MAX-RESULTS limit))
+          (category-count (get-category-count category)))
+        (if (>= start-index category-count)
+            (ok (list))
+            (ok (list))
+        )
+    )
+)
+
+(define-read-only (search-trades-by-offer (search-term (string-ascii 50)))
+    (ok (list))
+)
+
+(define-public (accept-categorized-trade (trade-id uint))
+    (let ((trade (unwrap! (get-categorized-trade trade-id) ERR-TRADE-NOT-FOUND)))
+        (asserts! (is-eq (get counterparty trade) tx-sender) ERR-NOT-AUTHORIZED)
+        (asserts! (is-eq (get status trade) TRADE-STATUS-PENDING) ERR-INVALID-STATE)
+        (ok (map-set categorized-trades
+            { trade-id: trade-id }
+            (merge trade { status: TRADE-STATUS-ACCEPTED })
+        ))
+    )
+)
