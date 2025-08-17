@@ -3,6 +3,9 @@
 (define-constant ERR-INVALID-STATE (err u102))
 (define-constant ERR-TIMEOUT (err u103))
 (define-constant ERR-ALREADY-VOTED (err u104))
+(define-constant ERR-INSUFFICIENT-DEPOSIT (err u105))
+(define-constant ERR-DEPOSIT-ALREADY-MADE (err u106))
+(define-constant ERR-NO-DEPOSIT-FOUND (err u107))
 
 (define-constant TRADE-STATUS-PENDING u0)
 (define-constant TRADE-STATUS-ACCEPTED u1)
@@ -12,6 +15,7 @@
 
 (define-constant DISPUTE-THRESHOLD u3)
 (define-constant TRADE-TIMEOUT-BLOCKS u144)
+(define-constant MIN-DEPOSIT-AMOUNT u1000000)
 
 (define-map trades
     { trade-id: uint }
@@ -41,12 +45,69 @@
 
 (define-data-var trade-nonce uint u0)
 
+(define-map escrow-deposits
+    { trade-id: uint, depositor: principal }
+    {
+        amount: uint,
+        deposited-at: uint
+    }
+)
+
+(define-map trade-deposit-requirements
+    { trade-id: uint }
+    {
+        required-amount: uint,
+        initiator-deposited: bool,
+        counterparty-deposited: bool
+    }
+)
+
 (define-read-only (get-trade (trade-id uint))
     (map-get? trades { trade-id: trade-id })
 )
 
 (define-read-only (get-dispute-votes (trade-id uint))
     (map-get? dispute-counts { trade-id: trade-id })
+)
+
+(define-read-only (get-deposit-requirements (trade-id uint))
+    (map-get? trade-deposit-requirements { trade-id: trade-id })
+)
+
+(define-read-only (get-escrow-deposit (trade-id uint) (depositor principal))
+    (map-get? escrow-deposits { trade-id: trade-id, depositor: depositor })
+)
+
+(define-public (create-trade-with-deposit (counterparty principal) (initiator-offer (string-ascii 256)) (counterparty-offer (string-ascii 256)) (deposit-amount uint))
+    (let ((trade-id (var-get trade-nonce)))
+        (asserts! (not (is-eq tx-sender counterparty)) ERR-INVALID-STATE)
+        (asserts! (>= deposit-amount MIN-DEPOSIT-AMOUNT) ERR-INSUFFICIENT-DEPOSIT)
+        
+        (map-set trades
+            { trade-id: trade-id }
+            {
+                initiator: tx-sender,
+                counterparty: counterparty,
+                initiator-offer: initiator-offer,
+                counterparty-offer: counterparty-offer,
+                status: TRADE-STATUS-PENDING,
+                created-at: burn-block-height,
+                completed-at: u0
+            }
+        )
+        
+        (map-set trade-deposit-requirements
+            { trade-id: trade-id }
+            {
+                required-amount: deposit-amount,
+                initiator-deposited: false,
+                counterparty-deposited: false
+            }
+        )
+        
+        (var-set trade-nonce (+ trade-id u1))
+        (ok trade-id)
+    )
 )
 
 (define-public (create-trade (counterparty principal) (initiator-offer (string-ascii 256)) (counterparty-offer (string-ascii 256)))
@@ -69,6 +130,43 @@
     )
 )
 
+(define-public (make-deposit (trade-id uint))
+    (let ((trade (unwrap! (get-trade trade-id) ERR-TRADE-NOT-FOUND))
+          (deposit-req (map-get? trade-deposit-requirements { trade-id: trade-id })))
+        (asserts! (or
+            (is-eq (get initiator trade) tx-sender)
+            (is-eq (get counterparty trade) tx-sender)
+        ) ERR-NOT-AUTHORIZED)
+        (asserts! (is-eq (get status trade) TRADE-STATUS-PENDING) ERR-INVALID-STATE)
+        (asserts! (is-some deposit-req) ERR-NO-DEPOSIT-FOUND)
+        (asserts! (is-none (get-escrow-deposit trade-id tx-sender)) ERR-DEPOSIT-ALREADY-MADE)
+        
+        (let ((deposit-amount (get required-amount (unwrap-panic deposit-req))))
+            (try! (stx-transfer? deposit-amount tx-sender (as-contract tx-sender)))
+            
+            (map-set escrow-deposits
+                { trade-id: trade-id, depositor: tx-sender }
+                {
+                    amount: deposit-amount,
+                    deposited-at: burn-block-height
+                }
+            )
+            
+            (let ((current-req (unwrap-panic deposit-req))
+                  (is-initiator (is-eq (get initiator trade) tx-sender)))
+                (map-set trade-deposit-requirements
+                    { trade-id: trade-id }
+                    (merge current-req {
+                        initiator-deposited: (if is-initiator true (get initiator-deposited current-req)),
+                        counterparty-deposited: (if (not is-initiator) true (get counterparty-deposited current-req))
+                    })
+                )
+            )
+            (ok true)
+        )
+    )
+)
+
 (define-public (accept-trade (trade-id uint))
     (let ((trade (unwrap! (get-trade trade-id) ERR-TRADE-NOT-FOUND)))
         (asserts! (is-eq (get counterparty trade) tx-sender) ERR-NOT-AUTHORIZED)
@@ -76,6 +174,40 @@
         (ok (map-set trades
             { trade-id: trade-id }
             (merge trade { status: TRADE-STATUS-ACCEPTED })
+        ))
+    )
+)
+
+(define-public (complete-trade-with-escrow (trade-id uint))
+    (let ((trade (unwrap! (get-trade trade-id) ERR-TRADE-NOT-FOUND))
+          (deposit-req (map-get? trade-deposit-requirements { trade-id: trade-id })))
+        (asserts! (or
+            (is-eq (get initiator trade) tx-sender)
+            (is-eq (get counterparty trade) tx-sender)
+        ) ERR-NOT-AUTHORIZED)
+        (asserts! (is-eq (get status trade) TRADE-STATUS-ACCEPTED) ERR-INVALID-STATE)
+        
+        (match deposit-req
+            requirements
+            (begin
+                (asserts! (get initiator-deposited requirements) ERR-NO-DEPOSIT-FOUND)
+                (asserts! (get counterparty-deposited requirements) ERR-NO-DEPOSIT-FOUND)
+                
+                (let ((initiator-deposit (unwrap-panic (get-escrow-deposit trade-id (get initiator trade))))
+                      (counterparty-deposit (unwrap-panic (get-escrow-deposit trade-id (get counterparty trade)))))
+                    (try! (as-contract (stx-transfer? (get amount initiator-deposit) tx-sender (get initiator trade))))
+                    (try! (as-contract (stx-transfer? (get amount counterparty-deposit) tx-sender (get counterparty trade))))
+                )
+            )
+            true
+        )
+        
+        (ok (map-set trades
+            { trade-id: trade-id }
+            (merge trade {
+                status: TRADE-STATUS-COMPLETED,
+                completed-at: burn-block-height
+            })
         ))
     )
 )
@@ -137,6 +269,39 @@
             }
         )
         (ok true)
+    )
+)
+
+(define-public (cancel-trade-with-escrow (trade-id uint))
+    (let ((trade (unwrap! (get-trade trade-id) ERR-TRADE-NOT-FOUND))
+          (deposit-req (map-get? trade-deposit-requirements { trade-id: trade-id })))
+        (asserts! (or
+            (is-eq (get initiator trade) tx-sender)
+            (is-eq (get counterparty trade) tx-sender)
+        ) ERR-NOT-AUTHORIZED)
+        (asserts! (< (get status trade) TRADE-STATUS-COMPLETED) ERR-INVALID-STATE)
+        
+        (match deposit-req
+            requirements
+            (begin
+                (match (get-escrow-deposit trade-id (get initiator trade))
+                    initiator-deposit
+                    (try! (as-contract (stx-transfer? (get amount initiator-deposit) tx-sender (get initiator trade))))
+                    true
+                )
+                (match (get-escrow-deposit trade-id (get counterparty trade))
+                    counterparty-deposit
+                    (try! (as-contract (stx-transfer? (get amount counterparty-deposit) tx-sender (get counterparty trade))))
+                    true
+                )
+            )
+            true
+        )
+        
+        (ok (map-set trades
+            { trade-id: trade-id }
+            (merge trade { status: TRADE-STATUS-CANCELLED })
+        ))
     )
 )
 
