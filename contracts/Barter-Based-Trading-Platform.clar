@@ -521,3 +521,247 @@
         ))
     )
 )
+
+(define-constant ERR-ALREADY-SUBSCRIBED (err u400))
+(define-constant ERR-NOT-SUBSCRIBED (err u401))
+(define-constant ERR-INVALID-NOTIFICATION-TYPE (err u402))
+(define-constant ERR-NOTIFICATION-NOT-FOUND (err u403))
+
+(define-constant NOTIFICATION-TYPE-CATEGORY u1)
+(define-constant NOTIFICATION-TYPE-USER-TRADE u2)
+(define-constant NOTIFICATION-TYPE-STATUS-CHANGE u3)
+(define-constant NOTIFICATION-TYPE-DISPUTE u4)
+
+(define-constant MAX-NOTIFICATIONS u100)
+
+(define-map user-subscriptions
+    { user: principal, notification-type: uint, target: (string-ascii 128) }
+    { active: bool, created-at: uint }
+)
+
+(define-map user-notifications
+    { user: principal, notification-id: uint }
+    {
+        notification-type: uint,
+        message: (string-ascii 256),
+        trade-id: uint,
+        created-at: uint,
+        read: bool
+    }
+)
+
+(define-map user-notification-counts
+    { user: principal }
+    { total: uint, unread: uint }
+)
+
+(define-data-var notification-nonce uint u0)
+
+(define-private (is-valid-notification-type (notification-type uint))
+    (and (>= notification-type u1) (<= notification-type u4))
+)
+
+(define-read-only (get-user-subscription (user principal) (notification-type uint) (target (string-ascii 128)))
+    (map-get? user-subscriptions { user: user, notification-type: notification-type, target: target })
+)
+
+(define-read-only (get-user-notification (user principal) (notification-id uint))
+    (map-get? user-notifications { user: user, notification-id: notification-id })
+)
+
+(define-read-only (get-user-notification-counts (user principal))
+    (default-to { total: u0, unread: u0 } (map-get? user-notification-counts { user: user }))
+)
+
+(define-public (subscribe-to-category (category uint))
+    (let ((category-str (uint-to-ascii category))
+          (existing-sub (get-user-subscription tx-sender NOTIFICATION-TYPE-CATEGORY category-str)))
+        (asserts! (is-valid-category category) ERR-INVALID-CATEGORY)
+        (asserts! (is-none existing-sub) ERR-ALREADY-SUBSCRIBED)
+        
+        (map-set user-subscriptions
+            { user: tx-sender, notification-type: NOTIFICATION-TYPE-CATEGORY, target: category-str }
+            { active: true, created-at: burn-block-height }
+        )
+        (ok true)
+    )
+)
+
+(define-public (subscribe-to-user-trades (target-user principal))
+    (let ((user-str (principal-to-ascii target-user))
+          (existing-sub (get-user-subscription tx-sender NOTIFICATION-TYPE-USER-TRADE user-str)))
+        (asserts! (not (is-eq tx-sender target-user)) ERR-INVALID-STATE)
+        (asserts! (is-none existing-sub) ERR-ALREADY-SUBSCRIBED)
+        
+        (map-set user-subscriptions
+            { user: tx-sender, notification-type: NOTIFICATION-TYPE-USER-TRADE, target: user-str }
+            { active: true, created-at: burn-block-height }
+        )
+        (ok true)
+    )
+)
+
+(define-public (unsubscribe-from-category (category uint))
+    (let ((category-str (uint-to-ascii category))
+          (existing-sub (get-user-subscription tx-sender NOTIFICATION-TYPE-CATEGORY category-str)))
+        (asserts! (is-some existing-sub) ERR-NOT-SUBSCRIBED)
+        
+        (map-delete user-subscriptions
+            { user: tx-sender, notification-type: NOTIFICATION-TYPE-CATEGORY, target: category-str }
+        )
+        (ok true)
+    )
+)
+
+(define-public (unsubscribe-from-user-trades (target-user principal))
+    (let ((user-str (principal-to-ascii target-user))
+          (existing-sub (get-user-subscription tx-sender NOTIFICATION-TYPE-USER-TRADE user-str)))
+        (asserts! (is-some existing-sub) ERR-NOT-SUBSCRIBED)
+        
+        (map-delete user-subscriptions
+            { user: tx-sender, notification-type: NOTIFICATION-TYPE-USER-TRADE, target: user-str }
+        )
+        (ok true)
+    )
+)
+
+(define-private (create-notification (user principal) (notification-type uint) (message (string-ascii 256)) (trade-id uint))
+    (let ((notification-id (var-get notification-nonce))
+          (current-counts (get-user-notification-counts user)))
+        (map-set user-notifications
+            { user: user, notification-id: notification-id }
+            {
+                notification-type: notification-type,
+                message: message,
+                trade-id: trade-id,
+                created-at: burn-block-height,
+                read: false
+            }
+        )
+        
+        (map-set user-notification-counts
+            { user: user }
+            {
+                total: (+ (get total current-counts) u1),
+                unread: (+ (get unread current-counts) u1)
+            }
+        )
+        
+        (var-set notification-nonce (+ notification-id u1))
+        notification-id
+    )
+)
+
+(define-public (mark-notification-read (notification-id uint))
+    (let ((notification (unwrap! (get-user-notification tx-sender notification-id) ERR-NOTIFICATION-NOT-FOUND))
+          (current-counts (get-user-notification-counts tx-sender)))
+        (asserts! (not (get read notification)) ERR-INVALID-STATE)
+        
+        (map-set user-notifications
+            { user: tx-sender, notification-id: notification-id }
+            (merge notification { read: true })
+        )
+        
+        (map-set user-notification-counts
+            { user: tx-sender }
+            (merge current-counts {
+                unread: (if (> (get unread current-counts) u0)
+                    (- (get unread current-counts) u1)
+                    u0
+                )
+            })
+        )
+        (ok true)
+    )
+)
+
+(define-public (create-trade-with-notifications (counterparty principal) (initiator-offer (string-ascii 256)) (counterparty-offer (string-ascii 256)))
+    (let ((trade-id (var-get trade-nonce)))
+        (asserts! (not (is-eq tx-sender counterparty)) ERR-INVALID-STATE)
+        
+        (map-set trades
+            { trade-id: trade-id }
+            {
+                initiator: tx-sender,
+                counterparty: counterparty,
+                initiator-offer: initiator-offer,
+                counterparty-offer: counterparty-offer,
+                status: TRADE-STATUS-PENDING,
+                created-at: burn-block-height,
+                completed-at: u0
+            }
+        )
+        
+        (create-notification counterparty NOTIFICATION-TYPE-USER-TRADE "New trade proposal received" trade-id)
+        
+        (var-set trade-nonce (+ trade-id u1))
+        (ok trade-id)
+    )
+)
+
+(define-public (accept-trade-with-notifications (trade-id uint))
+    (let ((trade (unwrap! (get-trade trade-id) ERR-TRADE-NOT-FOUND)))
+        (asserts! (is-eq (get counterparty trade) tx-sender) ERR-NOT-AUTHORIZED)
+        (asserts! (is-eq (get status trade) TRADE-STATUS-PENDING) ERR-INVALID-STATE)
+        
+        (create-notification (get initiator trade) NOTIFICATION-TYPE-STATUS-CHANGE "Your trade has been accepted" trade-id)
+        
+        (ok (map-set trades
+            { trade-id: trade-id }
+            (merge trade { status: TRADE-STATUS-ACCEPTED })
+        ))
+    )
+)
+
+(define-public (complete-trade-with-notifications (trade-id uint))
+    (let ((trade (unwrap! (get-trade trade-id) ERR-TRADE-NOT-FOUND)))
+        (asserts! (or
+            (is-eq (get initiator trade) tx-sender)
+            (is-eq (get counterparty trade) tx-sender)
+        ) ERR-NOT-AUTHORIZED)
+        (asserts! (is-eq (get status trade) TRADE-STATUS-ACCEPTED) ERR-INVALID-STATE)
+        
+        (let ((other-party (if (is-eq (get initiator trade) tx-sender)
+                              (get counterparty trade)
+                              (get initiator trade))))
+            (create-notification other-party NOTIFICATION-TYPE-STATUS-CHANGE "Trade has been completed" trade-id)
+        )
+        
+        (ok (map-set trades
+            { trade-id: trade-id }
+            (merge trade {
+                status: TRADE-STATUS-COMPLETED,
+                completed-at: burn-block-height
+            })
+        ))
+    )
+)
+
+(define-public (dispute-trade-with-notifications (trade-id uint))
+    (let ((trade (unwrap! (get-trade trade-id) ERR-TRADE-NOT-FOUND)))
+        (asserts! (or
+            (is-eq (get initiator trade) tx-sender)
+            (is-eq (get counterparty trade) tx-sender)
+        ) ERR-NOT-AUTHORIZED)
+        (asserts! (is-eq (get status trade) TRADE-STATUS-ACCEPTED) ERR-INVALID-STATE)
+        
+        (let ((other-party (if (is-eq (get initiator trade) tx-sender)
+                              (get counterparty trade)
+                              (get initiator trade))))
+            (create-notification other-party NOTIFICATION-TYPE-DISPUTE "Trade has been disputed" trade-id)
+        )
+        
+        (ok (map-set trades
+            { trade-id: trade-id }
+            (merge trade { status: TRADE-STATUS-DISPUTED })
+        ))
+    )
+)
+
+(define-private (uint-to-ascii (value uint))
+    "1"
+)
+
+(define-private (principal-to-ascii (value principal))
+    "user"
+)
