@@ -1,0 +1,26 @@
+{
+  "name": "barter-based-trading-platform",
+  "version": "1.0.0",
+  "description": "A decentralized barter trading platform with analytics and reputation system",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "clarinet check",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@hirosystems/clarinet-sdk": "^2.8.0",
+    "vitest": "^1.6.0",
+    "typescript": "^5.0.0"
+  },
+  "keywords": [
+    "stacks",
+    "blockchain",
+    "clarinet",
+    "smart-contracts",
+    "barter-trading",
+    "reputation-system"
+  ],
+  "author": "ozeyeyinoah <ozeyeyinoah@gmail.com>",
+  "license": "MIT"
+}
