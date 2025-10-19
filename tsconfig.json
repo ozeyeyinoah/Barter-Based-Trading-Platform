@@ -8,15 +8,11 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
-    "resolveJsonModule": true,
-    "isolatedModules": true,
-    "noEmit": true,
-    "types": ["vitest/globals"]
+    "declaration": true,
+    "outDir": "./dist",
+    "rootDir": "./",
+    "resolveJsonModule": true
   },
-  "include": [
-    "tests/**/*"
-  ],
-  "exclude": [
-    "node_modules"
-  ]
+  "include": ["tests/**/*"],
+  "exclude": ["node_modules", "dist"]
 }
