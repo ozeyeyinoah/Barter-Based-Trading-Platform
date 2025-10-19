@@ -2,7 +2,7 @@ import { Clarinet, Tx, Chain, Account, types } from '@hirosystems/clarinet-sdk';
 import { describe, it, expect, beforeEach } from 'vitest';
 
 const contracts = {
-  barterPlatform: 'Barter-Based-Trading-Platform'
+  barterPlatform: 'charity-donation-tracker'
 };
 
 describe('Barter Trading Platform with Analytics', () => {

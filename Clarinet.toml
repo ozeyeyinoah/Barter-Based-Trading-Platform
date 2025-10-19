@@ -1,13 +1,13 @@
 [project]
 name = 'Barter-Based-Trading-Platform'
-description = 'A decentralized barter trading platform with advanced features'
+description = 'A decentralized barter trading platform with advanced features including analytics and reputation system'
 authors = ['ozeyeyinoah <ozeyeyinoah@gmail.com>']
 telemetry = true
 cache_dir = './.cache'
 requirements = []
 
-[contracts.Barter-Based-Trading-Platform]
-path = 'contracts/Barter-Based-Trading-Platform.clar'
+[contracts.charity-donation-tracker]
+path = 'contracts/charity-donation-tracker.clar'
 clarity_version = 3
 epoch = 3.1
 
