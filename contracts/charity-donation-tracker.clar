@@ -6,6 +6,9 @@
 (define-constant ERR-INSUFFICIENT-DEPOSIT (err u105))
 (define-constant ERR-DEPOSIT-ALREADY-MADE (err u106))
 (define-constant ERR-NO-DEPOSIT-FOUND (err u107))
+(define-constant ERR-TRADE-ALREADY-CANCELLED (err u108))
+(define-constant ERR-CANCEL-INVALID-STATE (err u109))
+(define-constant ERR-REFUND-FAILED (err u110))
 
 (define-constant TRADE-STATUS-PENDING u0)
 (define-constant TRADE-STATUS-ACCEPTED u1)
@@ -991,5 +994,132 @@
 (define-public (get-top-rated-users (limit uint))
     (let ((actual-limit (if (> limit u20) u20 limit)))
         (ok (list))
+    )
+)
+
+;; ===========================================
+;; TRADE CANCELLATION & REFUND FEATURE
+;; ===========================================
+
+(define-map trade-cancellation-history
+    { trade-id: uint }
+    {
+        cancelled-by: principal,
+        cancelled-at: uint,
+        reason: (string-ascii 256),
+        refund-amount: uint,
+        refund-processed: bool
+    }
+)
+
+(define-map pending-refunds
+    { trade-id: uint, recipient: principal }
+    {
+        amount: uint,
+        created-at: uint,
+        claimed: bool
+    }
+)
+
+(define-read-only (get-cancellation-history (trade-id uint))
+    (map-get? trade-cancellation-history { trade-id: trade-id })
+)
+
+(define-read-only (get-pending-refund (trade-id uint) (recipient principal))
+    (map-get? pending-refunds { trade-id: trade-id, recipient: recipient })
+)
+
+(define-public (cancel-trade (trade-id uint) (reason (string-ascii 256)))
+    (let ((trade (unwrap! (get-trade trade-id) ERR-TRADE-NOT-FOUND))
+          (is-canceller-initiator (is-eq (get initiator trade) tx-sender))
+          (is-canceller-counterparty (is-eq (get counterparty trade) tx-sender))
+          (current-status (get status trade)))
+        
+        (asserts! (or is-canceller-initiator is-canceller-counterparty) ERR-NOT-AUTHORIZED)
+        (asserts! (or (is-eq current-status TRADE-STATUS-PENDING) (is-eq current-status TRADE-STATUS-ACCEPTED)) ERR-CANCEL-INVALID-STATE)
+        (asserts! (is-none (get-cancellation-history trade-id)) ERR-TRADE-ALREADY-CANCELLED)
+        
+        (map-set trades
+            { trade-id: trade-id }
+            (merge trade { status: TRADE-STATUS-CANCELLED })
+        )
+        
+        (map-set trade-cancellation-history
+            { trade-id: trade-id }
+            {
+                cancelled-by: tx-sender,
+                cancelled-at: burn-block-height,
+                reason: reason,
+                refund-amount: u0,
+                refund-processed: false
+            }
+        )
+        
+        (match (get-deposit-requirements trade-id)
+            deposit-reqs
+            (let ((required-amount (get required-amount deposit-reqs)))
+                (if (get initiator-deposited deposit-reqs)
+                    (map-set pending-refunds
+                        { trade-id: trade-id, recipient: (get initiator trade) }
+                        {
+                            amount: required-amount,
+                            created-at: burn-block-height,
+                            claimed: false
+                        }
+                    )
+                    true
+                )
+                (if (get counterparty-deposited deposit-reqs)
+                    (map-set pending-refunds
+                        { trade-id: trade-id, recipient: (get counterparty trade) }
+                        {
+                            amount: required-amount,
+                            created-at: burn-block-height,
+                            claimed: false
+                        }
+                    )
+                    true
+                )
+                true
+            )
+            true
+        )
+        
+        (ok true)
+    )
+)
+
+(define-public (claim-refund (trade-id uint))
+    (let ((trade (unwrap! (get-trade trade-id) ERR-TRADE-NOT-FOUND))
+          (refund (unwrap! (get-pending-refund trade-id tx-sender) ERR-NO-DEPOSIT-FOUND)))
+        
+        (asserts! (not (get claimed refund)) ERR-DEPOSIT-ALREADY-MADE)
+        (asserts! (is-eq (get status trade) TRADE-STATUS-CANCELLED) ERR-INVALID-STATE)
+        
+        (map-set pending-refunds
+            { trade-id: trade-id, recipient: tx-sender }
+            (merge refund { claimed: true })
+        )
+        
+        (ok (get amount refund))
+    )
+)
+
+(define-read-only (get-trade-status-name (status uint))
+    (if (is-eq status TRADE-STATUS-PENDING)
+        (ok "pending")
+        (if (is-eq status TRADE-STATUS-ACCEPTED)
+            (ok "accepted")
+            (if (is-eq status TRADE-STATUS-COMPLETED)
+                (ok "completed")
+                (if (is-eq status TRADE-STATUS-DISPUTED)
+                    (ok "disputed")
+                    (if (is-eq status TRADE-STATUS-CANCELLED)
+                        (ok "cancelled")
+                        (err u999)
+                    )
+                )
+            )
+        )
     )
 )
