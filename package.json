@@ -1,26 +1,25 @@
 {
-  "name": "barter-based-trading-platform",
+  "name": "Barter-Based-Trading-Platform-tests",
   "version": "1.0.0",
-  "description": "A decentralized barter trading platform with analytics and reputation system",
+  "description": "Smart contract tests for Barter Trading Platform with Trade Analytics",
+  "type": "module",
+  "private": true,
   "scripts": {
     "test": "vitest run",
-    "test:watch": "vitest",
+    "test:report": "vitest run -- --coverage --costs",
+    "test:watch": "chokidar \"tests/**/*.ts\" \"contracts/**/*.clar\" -c \"npm run test:report\"",
     "lint": "clarinet check",
     "typecheck": "tsc --noEmit"
   },
-  "devDependencies": {
-    "@hirosystems/clarinet-sdk": "^2.8.0",
-    "vitest": "^1.6.0",
-    "typescript": "^5.0.0"
-  },
-  "keywords": [
-    "stacks",
-    "blockchain",
-    "clarinet",
-    "smart-contracts",
-    "barter-trading",
-    "reputation-system"
-  ],
   "author": "ozeyeyinoah <ozeyeyinoah@gmail.com>",
-  "license": "MIT"
+  "license": "ISC",
+  "dependencies": {
+    "@hirosystems/clarinet-sdk": "^3.0.0",
+    "@stacks/transactions": "^7.0.5",
+    "chokidar-cli": "^3.0.0",
+    "typescript": "^5.6.0",
+    "vite": "^6.1.0",
+    "vitest": "^3.0.0",
+    "vitest-environment-clarinet": "^2.3.0"
+  }
 }
